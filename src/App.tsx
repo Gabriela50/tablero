@@ -1,41 +1,47 @@
 import { useMemo, useRef, useState } from "react";
-import { Layer, Line, Rect, Stage, Text } from "react-konva";
 import ZoomMeeting from "./components/ZoomMeeting";
-
-type Tool = "pen" | "eraser" | "text";
-
-type DrawLine = {
-  tool: "pen" | "eraser";
-  color: string;
-  points: number[];
-};
-
-type BoardText = {
-  id: number;
-  x: number;
-  y: number;
-  text: string;
-  color: string;
-};
+import BoardCanvas from "./components/board/BoardCanvas";
+import BoardToolbar from "./components/board/BoardToolbar";
+import { useBoard } from "./hooks/useBoard";
+import type { Tool } from "./types/board";
+import { analyzeBoard } from "./api/analysisApi";
 
 function App() {
-  const [selectedTool, setSelectedTool] = useState<Tool>("pen");
-  const [selectedColor, setSelectedColor] = useState("#ec4899");
-  const [lines, setLines] = useState<DrawLine[]>([]);
-  const [texts, setTexts] = useState<BoardText[]>([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-
-  const [textInput, setTextInput] = useState("");
-  const [pendingTextPosition, setPendingTextPosition] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
-
   const [aiStatus, setAiStatus] = useState(
     "La clase está lista. El siguiente paso será conectar Zoom y el análisis del backend."
   );
+  const [analysisSummary, setAnalysisSummary] = useState("");
+  const [analysisCorrections, setAnalysisCorrections] = useState<string[]>([]);
+  const [analysisScore, setAnalysisScore] = useState<number | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
 
   const stageRef = useRef<any>(null);
+
+  const {
+    selectedTool,
+    setSelectedTool,
+    selectedColor,
+    setSelectedColor,
+    lines,
+    texts,
+    images,
+    selectedElement,
+    setSelectedElement,
+    textInput,
+    setTextInput,
+    pendingTextPosition,
+    clearBoard,
+    startDrawing,
+    draw,
+    stopDrawing,
+    addTextToBoard,
+    cancelText,
+    updateTextPosition,
+    addImageToBoard,
+    updateImagePosition,
+    deleteSelectedElement,
+  } = useBoard();
 
   const stageSize = useMemo(() => {
     const width =
@@ -43,7 +49,7 @@ function App() {
         ? Math.min(window.innerWidth * 0.62, 1100)
         : window.innerWidth * 0.9;
 
-    const height = window.innerWidth >= 1024 ? 420 : 420;
+    const height = 420;
 
     return { width, height };
   }, []);
@@ -55,71 +61,61 @@ function App() {
       ? "Borrador"
       : "Texto";
 
-  const totalElements = lines.length + texts.length;
+  const totalElements = lines.length + texts.length + images.length;
 
-  const handleMouseDown = () => {
-    const stage = stageRef.current;
-    if (!stage) return;
+  const handleSelectTool = (tool: Tool) => {
+    setSelectedTool(tool);
 
-    const point = stage.getPointerPosition();
-    if (!point) return;
-
-    if (selectedTool === "text") {
-      setPendingTextPosition({ x: point.x, y: point.y });
-      setAiStatus("Escribe tu texto y agrégalo al tablero.");
-      return;
+    if (tool === "pen") {
+      setAiStatus("Modo lápiz activado.");
+    } else if (tool === "eraser") {
+      setAiStatus("Modo borrador activado.");
+    } else {
+      setAiStatus("Modo texto activado. Haz clic en el tablero.");
     }
-
-    setIsDrawing(true);
-
-    const newLine: DrawLine = {
-      tool: selectedTool === "eraser" ? "eraser" : "pen",
-      color: selectedTool === "eraser" ? "#ffffff" : selectedColor,
-      points: [point.x, point.y],
-    };
-
-    setLines((prev) => [...prev, newLine]);
   };
 
-  const handleMouseMove = () => {
-    if (!isDrawing || selectedTool === "text") return;
-
-    const stage = stageRef.current;
-    if (!stage) return;
-
-    const point = stage.getPointerPosition();
-    if (!point) return;
-
-    setLines((prev) => {
-      const lastLine = prev[prev.length - 1];
-      if (!lastLine) return prev;
-
-      const updatedLine: DrawLine = {
-        ...lastLine,
-        points: [...lastLine.points, point.x, point.y],
-      };
-
-      return [...prev.slice(0, -1), updatedLine];
-    });
+  const handleSelectColor = (color: string) => {
+    setSelectedColor(color);
+    if (selectedTool !== "eraser") {
+      setSelectedTool("pen");
+    }
+    setAiStatus("Color actualizado.");
   };
 
-  const handleMouseUp = () => {
-    setIsDrawing(false);
-  };
-
-  const clearBoard = () => {
-    setLines([]);
-    setTexts([]);
-    setTextInput("");
-    setPendingTextPosition(null);
+  const handleClearBoard = () => {
+    clearBoard();
+    setAnalysisSummary("");
+    setAnalysisCorrections([]);
+    setAnalysisScore(null);
+    setAnalysisError("");
     setAiStatus("El tablero fue limpiado.");
   };
 
-  const downloadBoard = () => {
-    const stage = stageRef.current;
-    if (!stage) return;
+  const handleUploadImage = (file: File) => {
+    const reader = new FileReader();
 
-    const dataURL = stage.toDataURL({ pixelRatio: 2 });
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") {
+        addImageToBoard(result);
+        setAiStatus("Imagen agregada al tablero.");
+      }
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const exportBoardAsBase64 = (): string | null => {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    return stage.toDataURL({ pixelRatio: 2 });
+  };
+
+  const downloadBoard = () => {
+    const dataURL = exportBoardAsBase64();
+    if (!dataURL) return;
+
     const link = document.createElement("a");
     link.download = "tablero-edulive.png";
     link.href = dataURL;
@@ -128,39 +124,56 @@ function App() {
     setAiStatus("El tablero fue exportado como imagen.");
   };
 
-  const addTextToBoard = () => {
-    if (!pendingTextPosition || !textInput.trim()) return;
-
-    const newText: BoardText = {
-      id: Date.now(),
-      x: pendingTextPosition.x,
-      y: pendingTextPosition.y,
-      text: textInput.trim(),
-      color: selectedColor,
-    };
-
-    setTexts((prev) => [...prev, newText]);
-    setTextInput("");
-    setPendingTextPosition(null);
+  const handleAddTextToBoard = () => {
+    addTextToBoard();
     setAiStatus("Texto agregado al tablero.");
   };
 
-  const cancelText = () => {
-    setTextInput("");
-    setPendingTextPosition(null);
+  const handleCancelText = () => {
+    cancelText();
     setAiStatus("Inserción de texto cancelada.");
   };
 
-  const updateTextPosition = (id: number, x: number, y: number) => {
-    setTexts((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, x, y } : item))
-    );
+  const handleDeleteSelected = () => {
+    deleteSelectedElement();
+    setAiStatus("Elemento eliminado del tablero.");
   };
 
-  const handleAnalyze = () => {
-    setAiStatus(
-      "Botón listo. Falta conectarlo al backend para enviar la imagen del tablero."
-    );
+  const handleAnalyze = async () => {
+    try {
+      const base64Image = exportBoardAsBase64();
+
+      if (!base64Image) {
+        setAiStatus("No se pudo exportar el tablero para analizar.");
+        setAnalysisError("No se pudo generar la imagen del tablero.");
+        return;
+      }
+
+      setIsAnalyzing(true);
+      setAnalysisError("");
+      setAnalysisSummary("");
+      setAnalysisCorrections([]);
+      setAnalysisScore(null);
+      setAiStatus("Analizando tablero...");
+
+      const response = await analyzeBoard({
+        subject: "Matematicas",
+        base64Image,
+      });
+
+      setAnalysisSummary(response.summary);
+      setAnalysisCorrections(response.corrections);
+      setAnalysisScore(response.score ?? null);
+      setAiStatus("Análisis completado correctamente.");
+    } catch (error) {
+      console.error(error);
+      setAnalysisError(
+        "No se pudo conectar con el backend o el endpoint devolvió un error."
+      );
+      setAiStatus("Ocurrió un error al analizar el tablero.");
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   return (
@@ -197,9 +210,10 @@ function App() {
 
             <button
               onClick={handleAnalyze}
-              className="rounded-full bg-gradient-to-r from-pink-500 to-fuchsia-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:shadow-xl"
+              disabled={isAnalyzing}
+              className="rounded-full bg-gradient-to-r from-pink-500 to-fuchsia-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Analizar
+              {isAnalyzing ? "Analizando..." : "Analizar"}
             </button>
           </div>
         </div>
@@ -207,116 +221,15 @@ function App() {
 
       <main className="mx-auto grid min-h-[calc(100vh-88px)] max-w-[1700px] grid-cols-12 gap-5 p-5">
         <aside className="col-span-12 xl:col-span-2">
-          <div className="h-full rounded-[28px] border border-white/50 bg-white/80 p-5 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur-xl">
-            <div className="mb-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
-                Board tools
-              </p>
-              <h2 className="mt-2 text-xl font-bold text-slate-900">
-                Herramientas
-              </h2>
-              <p className="text-sm text-slate-500">
-                Control del tablero durante la clase
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <button
-                onClick={() => {
-                  setSelectedTool("pen");
-                  setAiStatus("Modo lápiz activado.");
-                }}
-                className={`w-full rounded-2xl border px-4 py-3 text-left text-sm font-medium shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
-                  selectedTool === "pen"
-                    ? "border-pink-300 bg-pink-50 text-pink-600"
-                    : "border-slate-200/80 bg-white text-slate-700"
-                }`}
-              >
-                Lápiz
-              </button>
-
-              <button
-                onClick={() => {
-                  setSelectedTool("text");
-                  setAiStatus("Modo texto activado. Haz clic en el tablero.");
-                }}
-                className={`w-full rounded-2xl border px-4 py-3 text-left text-sm font-medium shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
-                  selectedTool === "text"
-                    ? "border-pink-300 bg-pink-50 text-pink-600"
-                    : "border-slate-200/80 bg-white text-slate-700"
-                }`}
-              >
-                Texto
-              </button>
-
-              <button
-                onClick={() => {
-                  setSelectedTool("eraser");
-                  setAiStatus("Modo borrador activado.");
-                }}
-                className={`w-full rounded-2xl border px-4 py-3 text-left text-sm font-medium shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
-                  selectedTool === "eraser"
-                    ? "border-pink-300 bg-pink-50 text-pink-600"
-                    : "border-slate-200/80 bg-white text-slate-700"
-                }`}
-              >
-                Borrador
-              </button>
-
-              <button
-                onClick={clearBoard}
-                className="w-full rounded-2xl border border-slate-200/80 bg-white px-4 py-3 text-left text-sm font-medium text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:border-pink-300 hover:shadow-md"
-              >
-                Limpiar
-              </button>
-            </div>
-
-            <div className="mt-6">
-              <p className="mb-3 text-sm font-semibold text-slate-700">Color</p>
-
-              <div className="grid grid-cols-4 gap-3">
-                {[
-                  "#ec4899",
-                  "#0f172a",
-                  "#2563eb",
-                  "#16a34a",
-                  "#f97316",
-                  "#9333ea",
-                  "#dc2626",
-                  "#14b8a6",
-                ].map((color) => (
-                  <button
-                    key={color}
-                    onClick={() => {
-                      setSelectedColor(color);
-                      if (selectedTool !== "eraser") setSelectedTool("pen");
-                      setAiStatus("Color actualizado.");
-                    }}
-                    className={`h-10 w-10 rounded-full border-4 transition ${
-                      selectedColor === color
-                        ? "scale-105 border-slate-300"
-                        : "border-white"
-                    }`}
-                    style={{ backgroundColor: color }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-6 rounded-3xl bg-gradient-to-br from-slate-900 to-slate-700 p-4 text-white shadow-lg">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-300">
-                Session
-              </p>
-              <h3 className="mt-2 text-lg font-semibold">Matemáticas</h3>
-              <p className="mt-1 text-sm text-slate-300">Reunión en vivo</p>
-              <p className="mt-3 text-sm text-slate-300">
-                Herramienta: {toolLabel}
-              </p>
-              <p className="mt-2 text-sm text-slate-300">
-                Elementos: {totalElements}
-              </p>
-            </div>
-          </div>
+          <BoardToolbar
+            selectedTool={selectedTool}
+            selectedColor={selectedColor}
+            totalElements={totalElements}
+            onSelectTool={handleSelectTool}
+            onSelectColor={handleSelectColor}
+            onClearBoard={handleClearBoard}
+            onUploadImage={handleUploadImage}
+          />
         </aside>
 
         <section className="col-span-12 xl:col-span-7">
@@ -348,6 +261,14 @@ function App() {
                   >
                     Exportar
                   </button>
+
+                  <button
+                    onClick={handleDeleteSelected}
+                    disabled={!selectedElement}
+                    className="rounded-full bg-rose-100 px-4 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Eliminar seleccionado
+                  </button>
                 </div>
               </div>
 
@@ -367,14 +288,14 @@ function App() {
                     />
 
                     <button
-                      onClick={addTextToBoard}
+                      onClick={handleAddTextToBoard}
                       className="rounded-2xl bg-gradient-to-r from-pink-500 to-fuchsia-500 px-5 py-3 text-sm font-semibold text-white shadow-md"
                     >
                       Agregar
                     </button>
 
                     <button
-                      onClick={cancelText}
+                      onClick={handleCancelText}
                       className="rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700"
                     >
                       Cancelar
@@ -383,62 +304,23 @@ function App() {
                 </div>
               )}
 
-              <div className="overflow-auto rounded-[32px] border border-slate-200 bg-white shadow-inner">
-                <Stage
-                  ref={stageRef}
-                  width={stageSize.width}
-                  height={stageSize.height}
-                  onMouseDown={handleMouseDown}
-                  onMousemove={handleMouseMove}
-                  onMouseup={handleMouseUp}
-                  onTouchStart={handleMouseDown}
-                  onTouchMove={handleMouseMove}
-                  onTouchEnd={handleMouseUp}
-                  className="rounded-[32px]"
-                >
-                  <Layer>
-                    <Rect
-                      x={0}
-                      y={0}
-                      width={stageSize.width}
-                      height={stageSize.height}
-                      fill="#ffffff"
-                    />
-
-                    {lines.map((line, index) => (
-                      <Line
-                        key={index}
-                        points={line.points}
-                        stroke={line.color}
-                        strokeWidth={line.tool === "eraser" ? 22 : 4}
-                        tension={0.5}
-                        lineCap="round"
-                        lineJoin="round"
-                        globalCompositeOperation={
-                          line.tool === "eraser"
-                            ? "destination-out"
-                            : "source-over"
-                        }
-                      />
-                    ))}
-
-                    {texts.map((item) => (
-                      <Text
-                        key={item.id}
-                        x={item.x}
-                        y={item.y}
-                        text={item.text}
-                        fontSize={24}
-                        fill={item.color}
-                        draggable
-                        onDragEnd={(e) =>
-                          updateTextPosition(item.id, e.target.x(), e.target.y())
-                        }
-                      />
-                    ))}
-                  </Layer>
-                </Stage>
-              </div>
+              <BoardCanvas
+                stageRef={stageRef}
+                width={stageSize.width}
+                height={stageSize.height}
+                lines={lines}
+                texts={texts}
+                images={images}
+                selectedElement={selectedElement}
+                onStartDrawing={startDrawing}
+                onDraw={draw}
+                onStopDrawing={stopDrawing}
+                onUpdateTextPosition={updateTextPosition}
+                onUpdateImagePosition={updateImagePosition}
+                onSelectText={(id) => setSelectedElement({ type: "text", id })}
+                onSelectImage={(id) => setSelectedElement({ type: "image", id })}
+                onClearSelection={() => setSelectedElement(null)}
+              />
             </div>
 
             <div className="rounded-[28px] border border-white/50 bg-white/80 p-4 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur-xl">
@@ -477,14 +359,17 @@ function App() {
 
               <div className="mt-6 rounded-2xl bg-white/10 p-4">
                 <p className="text-sm">Estado:</p>
-                <p className="font-bold text-green-300">Activo ahora</p>
+                <p className="font-bold text-green-300">
+                  {isAnalyzing ? "Analizando..." : "Activo ahora"}
+                </p>
               </div>
 
               <button
                 onClick={handleAnalyze}
-                className="mt-5 w-full rounded-2xl bg-white py-3 font-bold text-slate-900 transition hover:scale-105"
+                disabled={isAnalyzing}
+                className="mt-5 w-full rounded-2xl bg-white py-3 font-bold text-slate-900 transition hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Analizar tablero
+                {isAnalyzing ? "Analizando..." : "Analizar tablero"}
               </button>
             </div>
 
@@ -537,6 +422,47 @@ function App() {
               <p className="mt-3 text-sm leading-6 text-slate-600">
                 {aiStatus}
               </p>
+            </div>
+
+            <div className="rounded-[30px] border border-slate-100 bg-white p-5 shadow-xl">
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
+                Analysis Result
+              </p>
+
+              <h3 className="mt-2 text-xl font-bold text-slate-900">
+                Resultado del análisis
+              </h3>
+
+              {analysisError && (
+                <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                  {analysisError}
+                </div>
+              )}
+
+              <div className="mt-4 space-y-4 text-sm text-slate-600">
+                <div>
+                  <p className="font-semibold text-slate-800">Resumen</p>
+                  <p>{analysisSummary || "Aún no hay análisis."}</p>
+                </div>
+
+                <div>
+                  <p className="font-semibold text-slate-800">Correcciones</p>
+                  {analysisCorrections.length > 0 ? (
+                    <ul className="list-disc pl-5">
+                      {analysisCorrections.map((item, index) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>No hay correcciones todavía.</p>
+                  )}
+                </div>
+
+                <div>
+                  <p className="font-semibold text-slate-800">Puntaje</p>
+                  <p>{analysisScore !== null ? analysisScore : "Sin puntaje"}</p>
+                </div>
+              </div>
             </div>
           </div>
         </aside>
